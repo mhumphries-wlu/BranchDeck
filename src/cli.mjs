@@ -986,8 +986,34 @@ function startServices(slot, config, ctx) {
     });
     child.unref();
     fs.closeSync(out);
-    slot.procs[svc.id] = { pid: child.pid, startedAt: Date.now() };
+    let pid = child.pid;
+    if (IS_WIN) {
+      const real = resolveWindowsServicePid(child.pid);
+      if (real) pid = real;
+    }
+    slot.procs[svc.id] = { pid, startedAt: Date.now() };
   }
+}
+
+/**
+ * Windows only: the pid spawn() returns is the cmd.exe wrapper's — and with a
+ * non-detached spawn, libuv's kill-on-close job object takes the wrapper down
+ * as soon as this CLI process exits, while the actual server (the wrapper's
+ * child) lives on. Recording the wrapper pid therefore looks like a dead
+ * preview to every LATER branchdeck invocation. Resolve the wrapper's first
+ * child — the real server — and record that instead.
+ */
+function resolveWindowsServicePid(wrapperPid) {
+  for (let i = 0; i < 10; i += 1) {
+    const res = spawnSync('powershell', ['-NoProfile', '-Command',
+      `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${wrapperPid}" | Select-Object -First 1 -ExpandProperty ProcessId)`,
+    ], { encoding: 'utf8', windowsHide: true });
+    const v = Number.parseInt((res.stdout || '').trim(), 10);
+    if (Number.isFinite(v)) return v;
+    if (!pidAlive(wrapperPid)) return null; // wrapper already gone, nothing to find
+    spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)'], { windowsHide: true });
+  }
+  return null;
 }
 
 /** Signal a service's whole process tree. */

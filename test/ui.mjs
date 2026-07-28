@@ -183,7 +183,10 @@ async function main() {
     const p = state.previews[0];
     assert.equal(p.branch, 'feat/alpha');
     assert.ok(p.running, 'preview should be running');
-    const res = await fetch(p.url, { headers: { connection: 'close' } });
+    // localhost → ::1 on Node 18 with no IPv4 fallback; the server binds v4.
+    const res = await fetch(p.url.replace('//localhost:', '//127.0.0.1:'), {
+      headers: { connection: 'close' },
+    });
     assert.match(await res.text(), /feat\/alpha/);
   });
 

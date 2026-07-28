@@ -69,6 +69,9 @@ const deck = (args, cwd, opts) => sh(process.execPath, [CLI, ...args], cwd, opts
  * particular recovery behaviour.
  */
 function get(url, attempts = 5) {
+  // Node 18 resolves `localhost` to ::1 with no IPv4 fallback (Happy Eyeballs
+  // landed in Node 20); the preview servers bind 127.0.0.1. Pin the address.
+  url = url.replace('//localhost:', '//127.0.0.1:');
   return new Promise((resolve, reject) => {
     const attempt = (n, lastErr) => {
       if (n <= 0) return reject(lastErr || new Error('no attempts'));
