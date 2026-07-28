@@ -274,7 +274,7 @@ async function main() {
     git(['commit', '-qam', 'different deps'], seed);
     git(['push', '-q', 'origin', 'feat/two'], seed);
 
-    const out = deck(['sync', 'feat/two'], work);
+    const out = deck(['refresh', 'feat/two'], work);
     assert.match(out, /installing pool vendor/, out);
 
     const restartOut = deck(['restart', 'feat/one'], work);
@@ -300,16 +300,39 @@ async function main() {
     fs.writeFileSync(path.join(seed, 'deps.txt'), 'base\n');
     git(['commit', '-qam', 'back to base'], seed);
     git(['push', '-q', 'origin', 'feat/two'], seed);
-    const out = deck(['sync', 'feat/two'], work);
+    const out = deck(['refresh', 'feat/two'], work);
     assert.match(out, /using shared pool vendor/, out);
     const res = await get(/ready -> (\S+)/.exec(out)[1]);
     assert.match(res.body, /\|base$/);
   });
 
   // --- incremental behaviour ----------------------------------------------
-  test('sync with no new commits does not rebuild', () => {
-    const out = deck(['sync', 'feat/one'], work);
+  test('refresh with no new commits does not rebuild', () => {
+    const out = deck(['refresh', 'feat/one'], work);
     assert.match(out, /already up to date and running/);
+  });
+
+  // `sync` was the original name; scripts and muscle memory still use it.
+  test('sync is still accepted as an alias for refresh', () => {
+    assert.match(deck(['sync', 'feat/one'], work), /already up to date and running/);
+  });
+
+  test('refresh --port targets the preview listening on that port', () => {
+    const port = /web:(\d+)/.exec(deck(['status', '--offline'], work))[1];
+    const out = deck(['refresh', '--port', port], work);
+    assert.match(out, /\[feat\/one\]/, out);
+  });
+
+  test('refresh --port on an unused port names the ports that are in use', () => {
+    const out = deck(['refresh', '--port', '65000'], work, { allowFail: true });
+    assert.match(out, /no preview on port 65000/, out);
+    assert.match(out, /ports in use:/, out);
+  });
+
+  test('refresh with no argument covers every preview', () => {
+    const out = deck(['refresh'], work);
+    assert.match(out, /\[feat\/one\]/, out);
+    assert.match(out, /\[feat\/two\]/, out);
   });
 
   await testAsync('a new commit updates the served content', async () => {
@@ -317,7 +340,7 @@ async function main() {
     fs.writeFileSync(path.join(seed, 'src', 'marker.txt'), 'feat/one-v2\n');
     git(['commit', '-qam', 'v2'], seed);
     git(['push', '-q', 'origin', 'feat/one'], seed);
-    const out = deck(['sync', 'feat/one'], work);
+    const out = deck(['refresh', 'feat/one'], work);
     const res = await get(/ready -> (\S+)/.exec(out)[1]);
     assert.match(res.body, /^feat\/one-v2\|base$/);
   });
@@ -327,7 +350,7 @@ async function main() {
     fs.writeFileSync(path.join(seed, 'src', 'marker.txt'), 'feat/one-forced\n');
     git(['commit', '-qam', 'amended', '--amend'], seed);
     git(['push', '-q', '--force', 'origin', 'feat/one'], seed);
-    const out = deck(['sync', 'feat/one'], work);
+    const out = deck(['refresh', 'feat/one'], work);
     const res = await get(/ready -> (\S+)/.exec(out)[1]);
     assert.match(res.body, /^feat\/one-forced\|base$/);
   });
@@ -361,7 +384,7 @@ async function main() {
     assert.equal(res.status, 200);
   });
 
-  await testAsync('auto-reload: watcher injected and revision stamped every sync', async () => {
+  await testAsync('auto-reload: watcher injected and revision stamped on every refresh', async () => {
     git(['checkout', '-qb', 'feat/reload', 'master'], seed);
     const cfg = JSON.parse(fs.readFileSync(path.join(seed, 'preview.config.json'), 'utf8'));
     cfg.reload = { injectInto: ['dist/index.txt'], intervalSeconds: 2 };

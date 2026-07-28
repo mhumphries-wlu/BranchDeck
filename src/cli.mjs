@@ -8,8 +8,8 @@
  *
  * Each branch gets a "slot": a git worktree pinned to origin/<branch>, links
  * into shared dependency pools, generated env files, and one port per
- * declared service. `branchdeck watch` polls the remote and re-syncs,
- * rebuilds, and restarts any slot whose branch received new commits.
+ * declared service. `branchdeck refresh` re-syncs, rebuilds what changed,
+ * and restarts — on demand, never on a timer.
  *
  * The design point that makes this practical rather than a disk-space
  * disaster: dependency pools are CONTENT-ADDRESSED. A pool entry is keyed by
@@ -440,7 +440,6 @@ export function releaseLock() {
 const DEFAULT_SETTINGS = {
   basePort: 8101,
   browser: null, // "chrome" | "msedge" | "firefox" | null = OS default
-  watchIntervalSeconds: 60,
   // Re-navigate preview tabs the control pane opened once their services have
   // restarted. Off by default: reloading a tab someone is typing into loses
   // their work, so this is the user's call, not ours.
@@ -1227,8 +1226,28 @@ export const saveState = (state) => writeJson(STATE_FILE, { ...state, version: S
 // Commands
 // ---------------------------------------------------------------------------
 
-function resolveTargets(state, arg) {
+/**
+ * Which previews a command applies to.
+ *
+ * Accepts a branch name, `--all` (or nothing), or `--port <n>` — the port is
+ * often the only identifier in front of you, since it is what the browser tab
+ * showing the preview is pointed at.
+ */
+function resolveTargets(state, arg, rest = []) {
   const branches = Object.keys(state.slots);
+  if (arg === '--port') {
+    const port = Number.parseInt(rest[0], 10);
+    if (!Number.isFinite(port)) fail('usage: --port <number>');
+    const match = branches.find((b) =>
+      Object.values(state.slots[b].ports || {}).includes(port));
+    if (!match) {
+      const inUse = branches.flatMap((b) =>
+        Object.entries(state.slots[b].ports || {}).map(([id, p]) => `${p} (${b}/${id})`));
+      fail(`no preview on port ${port}.` +
+        (inUse.length ? `\n    ports in use: ${inUse.join(', ')}` : ''));
+    }
+    return [match];
+  }
   if (!arg || arg === '--all') {
     if (!branches.length) fail('no previews yet. Add one:  branchdeck add <branch>');
     return branches;
@@ -1243,7 +1262,7 @@ export async function cmdAdd(branch, settings, state) {
   if (!branch) fail('usage: branchdeck add <branch>');
   if (!validBranchName(branch)) fail(`unsupported branch name: "${branch}"`);
   if (state.slots[branch]) {
-    log(`preview for ${branch} already exists — syncing it instead.`);
+    log(`preview for ${branch} already exists — refreshing it instead.`);
     await syncSlot(state.slots[branch], settings);
     saveState(state);
     return;
@@ -1326,13 +1345,13 @@ export async function cmdRemove(branch, state) {
   log(`removed preview for ${target}. Shared pools kept — free them with: branchdeck gc`);
 }
 
-async function cmdSync(arg, settings, state, { force = false } = {}) {
-  for (const branch of resolveTargets(state, arg)) {
+async function cmdRefresh(arg, settings, state, { force = false, rest = [] } = {}) {
+  for (const branch of resolveTargets(state, arg, rest)) {
     try {
       const { changed } = await syncSlot(state.slots[branch], settings, { force });
       if (!changed) log(`  [${branch}] already up to date and running.`);
     } catch (err) {
-      log(`  [${branch}] sync failed: ${err.message}`);
+      log(`  [${branch}] refresh failed: ${err.message}`);
     }
     saveState(state);
   }
@@ -1449,26 +1468,6 @@ function cmdOpen(arg, settings, state) {
     for (const url of urls) spawnSync(opener, [url], { stdio: 'ignore' });
   }
   log(`opened: ${urls.join('  ')}`);
-}
-
-async function cmdWatch(settings, state) {
-  const interval = Math.max(10, Number(settings.watchIntervalSeconds) || 60) * 1000;
-  log(`watching ${Object.keys(state.slots).length} branch(es) every ${interval / 1000}s. Ctrl+C to stop.`);
-  await cmdSync('--all', settings, state);
-  for (;;) {
-    await sleep(interval);
-    for (const branch of Object.keys(state.slots)) {
-      try {
-        const { changed, healthy } = await syncSlot(state.slots[branch], settings);
-        if (changed) {
-          log(`${new Date().toLocaleTimeString()} — ${branch} updated${healthy === false ? ' (UNHEALTHY)' : ''}`);
-        }
-        saveState(state);
-      } catch (err) {
-        log(`${branch}: sync failed — ${err.message}`);
-      }
-    }
-  }
 }
 
 function cmdLogs(branch, state, { service = null, follow = false, lines = 80 } = {}) {
@@ -1600,8 +1599,8 @@ Usage: branchdeck <command>          (run from inside your repository)
   ui [--port N]          Open the browser control pane (add/manage previews)
   init [--force]         Detect your stack and write preview.config.json
   add <branch>           Create a preview for a remote branch and start it
-  sync [<branch>|--all]  Fetch, rebuild what changed, restart
-  watch                  Poll origin and auto-sync previews as branches move
+  refresh [<target>]     Fetch, rebuild what changed, restart. Target is a
+                         branch name, --port <n>, or nothing for all previews
   open [<branch>]        Open browser tab(s)
   status [--offline]     Table of previews: ports, running, sync state, pools
   stop [<branch>|--all]  Stop a preview's services
@@ -1619,8 +1618,8 @@ the repository itself. Config: preview.config.json (committed).
 Docs: https://github.com/mhumphries-wlu/BranchDeck`;
 
 const COMMANDS = new Set([
-  'init', 'ui', 'add', 'remove', 'rm', 'sync', 'restart', 'stop',
-  'status', 'open', 'watch', 'logs', 'consoles', 'gc',
+  'init', 'ui', 'add', 'remove', 'rm', 'refresh', 'sync', 'restart', 'stop',
+  'status', 'open', 'logs', 'consoles', 'gc',
 ]);
 
 /** Must keep working even when preview.config.json is broken or absent. */
@@ -1670,12 +1669,15 @@ async function main() {
     switch (cmd) {
       case 'add': await cmdAdd(arg, settings, state); break;
       case 'remove': case 'rm': await cmdRemove(arg, state); break;
-      case 'sync': await cmdSync(arg, settings, state); break;
-      case 'restart': await cmdSync(arg, settings, state, { force: true }); break;
+      // `sync` is the old name, kept working so existing habits and scripts
+      // do not break.
+      case 'refresh': case 'sync':
+        await cmdRefresh(arg, settings, state, { rest: argv.slice(2) }); break;
+      case 'restart':
+        await cmdRefresh(arg, settings, state, { force: true, rest: argv.slice(2) }); break;
       case 'stop': await cmdStop(arg, state); break;
       case 'status': cmdStatus(state, { offline: arg === '--offline' }); break;
       case 'open': cmdOpen(arg, settings, state); break;
-      case 'watch': await cmdWatch(settings, state); break;
       case 'logs': cmdLogs(arg, state, {
         service: argv[2] && !argv[2].startsWith('--') ? argv[2] : null,
         follow: argv.includes('--follow') || argv.includes('-f'),

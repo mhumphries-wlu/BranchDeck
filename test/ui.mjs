@@ -202,6 +202,22 @@ async function main() {
     assert.equal(body.branches.find((b) => b.name === 'feat/alpha').added, true);
   });
 
+  // The Refresh button. Nothing changed on origin, so it must report that and
+  // leave the running servers alone.
+  await test('the refresh action is a no-op when the branch has not moved', async () => {
+    const before = (await api('/api/state')).body.previews[0].startedAt;
+    await api('/api/action', { method: 'POST', body: JSON.stringify({ action: 'refresh', branch: 'feat/alpha' }) });
+    const until = Date.now() + 60000;
+    let s;
+    do {
+      await sleep(400);
+      s = (await api('/api/state')).body;
+    } while (s.busy && Date.now() < until);
+    assert.ok(s.activity.some((a) => /already up to date and running/.test(a.message)),
+      `expected a no-op refresh, got:\n${s.activity.map((a) => a.message).join('\n')}`);
+    assert.equal(s.previews[0].startedAt, before, 'a no-op refresh must not restart anything');
+  });
+
   await test('startedAt advances on restart (drives tab auto-reload)', async () => {
     const before = (await api('/api/state')).body.previews[0].startedAt;
     assert.ok(before > 0, 'a running preview must report when it started');
@@ -269,10 +285,11 @@ async function main() {
     assert.equal((await api('/api/state')).body.settings.browser, 'msedge');
   });
 
-  await test('watch can be toggled', async () => {
-    assert.equal((await api('/api/watch', { method: 'POST', body: JSON.stringify({ enabled: true }) })).body.watch, true);
-    assert.equal((await api('/api/state')).body.watch, true);
-    assert.equal((await api('/api/watch', { method: 'POST', body: JSON.stringify({ enabled: false }) })).body.watch, false);
+  // Refreshing is on-demand only; there is no background poller to toggle.
+  await test('there is no watch endpoint', async () => {
+    const r = await api('/api/watch', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+    assert.equal(r.status, 404);
+    assert.equal((await api('/api/state')).body.watch, undefined);
   });
 
   // Regression: a failing job used to call process.exit and take the whole

@@ -38,8 +38,6 @@ import {
 const activity = []; // recent progress lines, newest last
 let currentJob = null;
 let queue = [];
-let watchTimer = null;
-let watchEnabled = false;
 
 function push(level, message) {
   activity.push({ at: Date.now(), level, message });
@@ -160,7 +158,6 @@ function snapshot({ remote = false } = {}) {
     configError: cfg.ok ? null : cfg.error,
     busy: currentJob ? currentJob.label : null,
     queued: queue.map((j) => j.label),
-    watch: watchEnabled,
     activity: activity.slice(-120),
   };
 }
@@ -194,8 +191,8 @@ function action(name, branch) {
     case 'add':
       if (!branch) throw new Error('no branch given');
       return enqueue(`add ${branch}`, withState((s, set) => cmdAdd(branch, set, s)));
-    case 'sync':
-      return enqueue(`sync ${branch}`, withState(async (s, set) => {
+    case 'refresh':
+      return enqueue(`refresh ${branch}`, withState(async (s, set) => {
         if (!s.slots[branch]) throw new Error(`no preview for ${branch}`);
         const r = await syncSlot(s.slots[branch], set);
         if (!r.changed) push('info', `  [${branch}] already up to date and running.`);
@@ -213,8 +210,8 @@ function action(name, branch) {
       }));
     case 'remove':
       return enqueue(`remove ${branch}`, withState((s) => cmdRemove(branch, s)));
-    case 'syncAll':
-      return enqueue('sync all', withState(async (s, set) => {
+    case 'refreshAll':
+      return enqueue('refresh all', withState(async (s, set) => {
         for (const b of Object.keys(s.slots)) {
           try {
             const r = await syncSlot(s.slots[b], set);
@@ -228,21 +225,6 @@ function action(name, branch) {
       return enqueue('gc', withState((s) => cmdGc(s)));
     default:
       throw new Error(`unknown action "${name}"`);
-  }
-}
-
-function setWatch(enabled, intervalSeconds) {
-  watchEnabled = !!enabled;
-  if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
-  if (watchEnabled) {
-    const ms = Math.max(10, Number(intervalSeconds) || 60) * 1000;
-    watchTimer = setInterval(() => {
-      // Skip a tick rather than pile up if something is still running.
-      if (!currentJob && queue.length === 0) action('syncAll');
-    }, ms);
-    push('info', `watch on — checking origin every ${ms / 1000}s`);
-  } else {
-    push('info', 'watch off');
   }
 }
 
@@ -351,7 +333,6 @@ export async function startUi({ port: wanted, open = true } = {}) {
         const merged = { ...loadSettings(), ...incoming };
         fs.writeFileSync(paths().SETTINGS_FILE, `${JSON.stringify(merged, null, 2)}\n`);
         push('info', 'saved settings');
-        if (watchEnabled) setWatch(true, merged.watchIntervalSeconds);
         return send(res, 200, { ok: true, settings: merged });
       }
       if (req.method === 'POST' && url.pathname === '/api/action') {
@@ -359,11 +340,6 @@ export async function startUi({ port: wanted, open = true } = {}) {
         if (branch && !validBranchName(branch)) return send(res, 400, { error: 'bad branch name' });
         action(name, branch); // fire and forget; the page polls for progress
         return send(res, 202, { accepted: true });
-      }
-      if (req.method === 'POST' && url.pathname === '/api/watch') {
-        const { enabled } = JSON.parse(await readBody(req));
-        setWatch(enabled, loadSettings().watchIntervalSeconds);
-        return send(res, 200, { watch: watchEnabled });
       }
       return send(res, 404, { error: 'not found' });
     } catch (err) {
@@ -486,7 +462,7 @@ const PAGE = `<!doctype html>
       <div class="row">
         <select id="branch" class="grow"><option>loading…</option></select>
         <button class="primary" id="addbtn" onclick="add()">Add preview</button>
-        <button onclick="loadBranches()" title="Re-read branches from origin">Refresh</button>
+        <button onclick="loadBranches()" title="Re-read the branch list from origin">Reload branches</button>
       </div>
       <p class="hint" id="branchhint" style="margin:8px 0 0"></p>
     </div>
@@ -495,14 +471,12 @@ const PAGE = `<!doctype html>
       <div class="row" style="margin-bottom:6px">
         <h2 style="margin:0">Previews</h2>
         <div class="spacer"></div>
-        <label class="row" style="gap:6px;font-size:12.5px;color:var(--muted)">
-          <input type="checkbox" id="watch" onchange="toggleWatch()"> auto-sync
-        </label>
         <label class="row" style="gap:6px;font-size:12.5px;color:var(--muted)"
                title="After a preview restarts, re-navigate the tab this pane opened for it.">
           <input type="checkbox" id="autoreload" onchange="toggleAutoReload()"> auto-reload tabs
         </label>
-        <button onclick="act('syncAll')">Sync all</button>
+        <button class="primary" onclick="act('refreshAll')"
+                title="Pull the newest commit on each branch and restart the previews that changed">Refresh all</button>
         <button onclick="openAll()">Open all tabs</button>
         <button onclick="act('gc')" title="Delete dependency pools nothing uses">Free unused pools</button>
       </div>
@@ -527,7 +501,6 @@ const PAGE = `<!doctype html>
       <div class="row" style="align-items:flex-end">
         <label class="field">Base port<input type="number" id="s-basePort" style="width:110px"></label>
         <label class="field">Browser<input type="text" id="s-browser" placeholder="chrome / msedge / blank" style="width:190px"></label>
-        <label class="field">Auto-sync interval (s)<input type="number" id="s-interval" style="width:130px"></label>
         <button class="primary" onclick="saveSettings()">Save settings</button>
         <span id="setmsg" class="hint"></span>
       </div>
@@ -542,7 +515,7 @@ const PAGE = `<!doctype html>
       </div>
       <div id="cfgmsg"></div>
       <textarea id="cfg" spellcheck="false"></textarea>
-      <p class="hint">Changes apply on the next sync of each preview. Each preview
+      <p class="hint">Changes apply the next time you refresh each preview. Each preview
         actually uses the config on <em>its own branch</em>, so a branch may define extra services.</p>
     </div>
   </section>
@@ -624,14 +597,13 @@ function showTab(which) {
   if (which === 'config' && !document.getElementById('cfg').value) loadConfig();
 }
 
-async function refresh(remote) {
+async function render(remote) {
   try {
     STATE = await api('/api/state' + (remote ? '?remote=1' : ''));
   } catch (e) { return; }
   const repoEl = document.getElementById('repo');
   repoEl.textContent = STATE.repo;          // full path is long; keep it in the tooltip
   repoEl.title = STATE.repoPath;
-  document.getElementById('watch').checked = STATE.watch;
   document.getElementById('autoreload').checked = !!STATE.settings.autoReloadTabs;
   syncTabs(STATE.previews);
 
@@ -657,7 +629,7 @@ async function refresh(remote) {
           ? '<a class="open" href="' + p.url + '" target="' + tabName(p.branch) +
             '" onclick="return openFromLink(event,\\'' + esc(p.branch) + '\\',\\'' + p.url + '\\')">Open ↗</a>'
           : '') +
-        '<button onclick="act(\\'sync\\',\\'' + esc(p.branch) + '\\')">Sync</button>' +
+        '<button onclick="act(\\'refresh\\',\\'' + esc(p.branch) + '\\')">Refresh</button>' +
         '<button onclick="act(\\'restart\\',\\'' + esc(p.branch) + '\\')">Restart</button>' +
         '<button onclick="act(\\'stop\\',\\'' + esc(p.branch) + '\\')">Stop</button>' +
         '<button class="danger" onclick="remove(\\'' + esc(p.branch) + '\\')">Remove</button>' +
@@ -675,7 +647,7 @@ async function refresh(remote) {
     ? '<span class="spin"></span> ' + esc(STATE.busy) + (STATE.queued.length ? ' (+' + STATE.queued.length + ' queued)' : '')
     : '';
   document.querySelectorAll('button').forEach((b) => {
-    if (b.dataset.always === undefined && /Add preview|Sync|Restart|Stop|Remove|Free unused/.test(b.textContent)) {
+    if (b.dataset.always === undefined && /Add preview|Refresh|Restart|Stop|Remove|Free unused/.test(b.textContent)) {
       b.disabled = !!STATE.busy;
     }
   });
@@ -762,7 +734,7 @@ async function loadBranches() {
 async function act(action, branch) {
   try { await api('/api/action', { method: 'POST', body: JSON.stringify({ action, branch }) }); }
   catch (e) { alert(e.message); }
-  refresh();
+  render();
 }
 async function add() {
   const branch = document.getElementById('branch').value;
@@ -794,12 +766,7 @@ async function toggleAutoReload() {
       ? 'auto-reload on — tabs opened from this pane refresh after their preview restarts'
       : 'auto-reload off');
   } catch (e) { alert(e.message); }
-  refresh();
-}
-async function toggleWatch() {
-  const enabled = document.getElementById('watch').checked;
-  try { await api('/api/watch', { method: 'POST', body: JSON.stringify({ enabled }) }); } catch (e) { alert(e.message); }
-  refresh();
+  render();
 }
 
 async function loadConfig() {
@@ -809,21 +776,19 @@ async function loadConfig() {
   const s = STATE?.settings || {};
   document.getElementById('s-basePort').value = s.basePort ?? 8101;
   document.getElementById('s-browser').value = s.browser ?? '';
-  document.getElementById('s-interval').value = s.watchIntervalSeconds ?? 60;
 }
 async function saveConfig() {
   const msg = document.getElementById('cfgmsg');
   try {
     await api('/api/config', { method: 'PUT', body: JSON.stringify({ text: document.getElementById('cfg').value }) });
-    msg.innerHTML = '<p class="ok">Saved. Sync a preview to apply it.</p>';
-    refresh();
+    msg.innerHTML = '<p class="ok">Saved. Refresh a preview to apply it.</p>';
+    render();
   } catch (e) { msg.innerHTML = '<p class="err">' + esc(e.message) + '</p>'; }
 }
 async function saveSettings() {
   const body = {
     basePort: Number(document.getElementById('s-basePort').value) || 8101,
     browser: document.getElementById('s-browser').value.trim() || null,
-    watchIntervalSeconds: Number(document.getElementById('s-interval').value) || 60,
   };
   const el = document.getElementById('setmsg');
   try {
@@ -833,9 +798,9 @@ async function saveSettings() {
 }
 
 loadBranches();
-refresh(true);
-setInterval(() => refresh(), POLL);
-setInterval(() => refresh(true), 30000);   // periodic origin check
+render(true);
+setInterval(() => render(), POLL);
+setInterval(() => render(true), 30000);   // periodic origin check
 </script>
 </body>
 </html>`;

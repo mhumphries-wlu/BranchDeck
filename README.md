@@ -31,7 +31,8 @@ what changed, and the tab in front of you can refresh itself.
   folders that git manages for you, sharing your clone's history.
 - **Shared dependency installs.** The tenth preview costs megabytes, not
   another `node_modules`.
-- **Auto-sync.** New commits get pulled, rebuilt, and restarted on their own.
+- **One-command updates.** `branchdeck refresh` pulls the newest commits,
+  rebuilds only what changed, and restarts.
 - **Auto-reload.** Open tabs refresh when their preview is rebuilt.
 - **A browser control pane**, if you'd rather click than type.
 - **No Docker, no cloud, no background service.** Ordinary processes on your
@@ -67,7 +68,7 @@ Check it worked:
 branchdeck version
 ```
 ```
-0.2.1
+0.3.0
 ```
 
 Once branchdeck is published this becomes `npm install -g branchdeck`.
@@ -139,21 +140,24 @@ branchdeck add agent/search-fixes
 branchdeck open
 ```
 
-**Keep them current:**
+**Bring them up to date** — when your agent pushes something and you want to
+see it:
 
 ```bash
-branchdeck watch
+branchdeck refresh                          # every preview
+branchdeck refresh claude/fix-login-4a2f9c  # one branch
+branchdeck refresh --port 8101              # whichever branch is on that port
 ```
 
-branchdeck syncs everything once, then checks `origin` every 60 seconds. When
-a branch moves, it updates that worktree, rebuilds what changed, and restarts
-the preview. Leave it running while you work. `Ctrl+C` stops the watching; the
-previews keep running.
+A refresh fetches from `origin`. If the branch hasn't moved and its servers
+are still up, branchdeck says `already up to date and running` and leaves them
+alone. If it *has* moved, the worktree is updated, only the build steps whose
+inputs changed re-run, and the servers restart on the same ports. Tabs you
+opened from branchdeck reload themselves once the app is back.
 
-One thing to know: `watch` holds branchdeck's lock the whole time it's up, so
-other `branchdeck` commands in that repository will refuse to run until you
-stop it. To watch *and* keep clicking around, use the control pane's auto-sync
-toggle instead — that only takes the lock while a sync is actually happening.
+Refreshing is deliberately something you ask for. branchdeck does not poll
+`origin` in the background, so it never restarts a server while you're in the
+middle of clicking through it — nothing moves until you say so.
 
 ## The browser control pane
 
@@ -162,10 +166,14 @@ branchdeck ui
 ```
 
 Everything the CLI does, as a web page: pick a branch from a dropdown to add
-it, control each preview with Open / Sync / Restart / Stop / Remove, watch a
-live activity feed, and flip between named consoles for each running server.
+it, control each preview with Open / Refresh / Restart / Stop / Remove, follow
+a live activity feed, and flip between named consoles for each running server.
 There's a config editor too, which validates before it saves, so a stray comma
 can't quietly break every preview.
+
+**Refresh all**, at the top of the previews list, is the button version of
+`branchdeck refresh`; each preview has its own **Refresh** for one branch at a
+time.
 
 It opens on port 8100 by default — `--port` to change that, `--no-open` to
 skip launching the browser.
@@ -209,10 +217,11 @@ genuinely differ cost exactly what they should.
 
 ## Auto-reload
 
-`watch` keeps the *app* current. Auto-reload keeps the *tab* current.
+`refresh` keeps the *app* current. Auto-reload keeps the *tab* current, so you
+don't have to hit F5 after every refresh.
 
 Add a `reload` block to your config and branchdeck writes two small files into
-your build output on every sync — a revision marker and a watcher script — and
+your build output on every refresh — a revision marker and a watcher script — and
 adds a `<script>` tag to your built HTML pointing at the watcher. The page
 checks the marker every few seconds and reloads when it changes. Same idea as
 LiveReload, without putting a proxy in front of your app.
@@ -237,7 +246,7 @@ apps like Next.js in production mode can't use it. And you can turn it off
 globally with `"autoReload": false` in settings, or for one project by
 removing the block.
 
-## Watching your servers
+## Seeing what your servers print
 
 Servers run in the background — no console window per branch, nothing you can
 close by accident and kill your app.
@@ -271,10 +280,11 @@ easier.
 | --- | --- |
 | `branchdeck init [--force]` | Detect your stack, write `preview.config.json` |
 | `branchdeck add <branch>` | Create a preview and start it |
-| `branchdeck sync [<branch>\|--all]` | Fetch, rebuild what changed, restart |
-| `branchdeck watch` | Auto-sync on an interval (holds the lock while running) |
+| `branchdeck refresh` | Fetch every preview, rebuild what changed, restart |
+| `branchdeck refresh <branch>` | Same, for one branch |
+| `branchdeck refresh --port <n>` | Same, for whichever branch is on that port |
 | `branchdeck open [<branch>]` | Open browser tabs |
-| `branchdeck status [--offline]` | Ports, running services, sync state, sharing |
+| `branchdeck status [--offline]` | Ports, running services, commit, sharing |
 | `branchdeck stop [<branch>\|--all]` | Stop a preview's servers |
 | `branchdeck restart [<branch>]` | Rebuild if needed and restart |
 | `branchdeck logs <branch> [service] [--follow]` | Show or stream a log |
@@ -321,7 +331,8 @@ path instead.
 ]
 ```
 
-A step runs on the first sync, whenever its `output` is missing, and after
+A step runs the first time a preview is built, whenever its `output` is
+missing, and after
 that only when a commit touches something under `when`. Leave `when` out and
 it runs on every new commit. Steps also take `cwd` and `env`.
 
@@ -407,9 +418,9 @@ written.
   database — until you separate them. The `${SLOT}` example above is how.
 - **A preview shows what was pushed.** If an agent hasn't pushed yet, there's
   nothing for branchdeck to see.
-- **Don't edit files inside a preview's folder.** Every sync resets it to
+- **Don't edit files inside a preview's folder.** Every refresh resets it to
   match `origin` exactly, and your changes go with it. The generated env file
-  is rewritten each sync too — edit the one in your clone instead.
+  is rewritten each refresh too — edit the one in your clone instead.
 - **The first `add` is slow**, and it needs whatever your app needs: a real
   `.env`, a database that's running. branchdeck runs your app; it can't
   substitute for its requirements.
@@ -441,8 +452,9 @@ causes. Without the service name you'll get build output instead.
 **A login or form gets rejected on a preview** — your app doesn't trust
 `localhost:8101` as an origin yet. Add it with `appendToCsv` in `envFiles`.
 
-**`another branchdeck command is running`** — a `branchdeck watch` elsewhere
-is holding the lock. Stop it, or use the control pane's auto-sync instead. If
+**`another branchdeck command is running`** — branchdeck runs one command at a
+time per repository, so a long `add` or `refresh` in another terminal (or in
+the control pane) will hold the lock until it finishes. Wait for it. If
 nothing is really running, delete `<repo>-previews/.lock`.
 
 **Port already in use** — `branchdeck restart <branch>` stops its own process
@@ -479,9 +491,9 @@ myrepo-previews/
   pool/<id>/<hash>/            shared installs
   logs/<slot>.log              install and build output
   logs/<slot>.<service>.log    one console per server
-  state.json                   previews, ports, synced commits
-  settings.json                basePort, browser, watchIntervalSeconds,
-                               autoReload, autoReloadTabs, env, uiPort
+  state.json                   previews, ports, the commit each one is on
+  settings.json                basePort, browser, autoReload,
+                               autoReloadTabs, env, uiPort
   .lock                        held while a command runs
 ```
 
