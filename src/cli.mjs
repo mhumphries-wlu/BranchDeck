@@ -986,34 +986,32 @@ function startServices(slot, config, ctx) {
     });
     child.unref();
     fs.closeSync(out);
-    let pid = child.pid;
-    if (IS_WIN) {
-      const real = resolveWindowsServicePid(child.pid);
-      if (real) pid = real;
-    }
-    slot.procs[svc.id] = { pid, startedAt: Date.now() };
+    // The pid spawn() returns is the cmd.exe wrapper's, not the real server's
+    // — reconciled against the true owner once the port is confirmed live,
+    // see resolveWindowsPortOwner. This is a placeholder until then.
+    slot.procs[svc.id] = { pid: child.pid, startedAt: Date.now() };
   }
 }
 
 /**
- * Windows only: the pid spawn() returns is the cmd.exe wrapper's — and with a
- * non-detached spawn, libuv's kill-on-close job object takes the wrapper down
- * as soon as this CLI process exits, while the actual server (the wrapper's
- * child) lives on. Recording the wrapper pid therefore looks like a dead
- * preview to every LATER branchdeck invocation. Resolve the wrapper's first
- * child — the real server — and record that instead.
+ * Windows only: the pid of whatever process is currently LISTENING on `port`.
+ *
+ * Walking cmd.exe's child processes (ParentProcessId) to find the real server
+ * is ambiguous: Windows can spawn more than one child under the wrapper — a
+ * conhost.exe console host, for instance — and nothing guarantees a WMI query
+ * returns the long-lived server first rather than a helper that exits
+ * moments later. Record that helper's pid and the mistake is invisible until
+ * Windows recycles the number during the next build's process churn, at
+ * which point the drift check (correctly) decides the recorded pid isn't
+ * ours anymore. The port has no such ambiguity: branchdeck allocated it, so
+ * whoever the OS says owns it right now IS the server, by construction.
  */
-function resolveWindowsServicePid(wrapperPid) {
-  for (let i = 0; i < 10; i += 1) {
-    const res = spawnSync('powershell', ['-NoProfile', '-Command',
-      `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${wrapperPid}" | Select-Object -First 1 -ExpandProperty ProcessId)`,
-    ], { encoding: 'utf8', windowsHide: true });
-    const v = Number.parseInt((res.stdout || '').trim(), 10);
-    if (Number.isFinite(v)) return v;
-    if (!pidAlive(wrapperPid)) return null; // wrapper already gone, nothing to find
-    spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)'], { windowsHide: true });
-  }
-  return null;
+function resolveWindowsPortOwner(port) {
+  const res = spawnSync('powershell', ['-NoProfile', '-Command',
+    `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess)`,
+  ], { encoding: 'utf8', windowsHide: true });
+  const v = Number.parseInt((res.stdout || '').trim(), 10);
+  return Number.isFinite(v) ? v : null;
 }
 
 /** Signal a service's whole process tree. */
@@ -1196,6 +1194,15 @@ export async function syncSlot(slot, settings, { force = false } = {}) {
   await stopServices(slot, { quiet: true });
   startServices(slot, config, { ...ctx, ...expand(settings.env || {}, ctx) });
   const health = await waitHealthy(slot, config);
+  if (IS_WIN) {
+    // Reconcile every service's recorded pid against reality now that we
+    // know (via waitHealthy) the port has had a chance to come up. A
+    // service that never started just resolves to null and is left alone.
+    for (const svc of config.services) {
+      const owner = resolveWindowsPortOwner(slot.ports[svc.id]);
+      if (owner) slot.procs[svc.id] = { pid: owner, startedAt: Date.now() };
+    }
+  }
   if (health.ok) {
     log(`  [${slot.branch}] ready -> ${slotUrl(slot, config)}`);
   } else {
