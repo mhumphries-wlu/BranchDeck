@@ -1,0 +1,38 @@
+{
+  "name": "branchdeck",
+  "version": "0.2.0",
+  "description": "Local preview deployments for every git branch — one browser tab each, from a single clone, with shared dependency installs.",
+  "keywords": [
+    "git",
+    "worktree",
+    "preview",
+    "preview-environments",
+    "branch",
+    "dev-server",
+    "monorepo",
+    "ai-agents",
+    "parallel-development"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "branchdeck": "src/cli.mjs"
+  },
+  "files": [
+    "src",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/e2e.mjs && node test/ui.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mhumphries-wlu/BranchDeck.git"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,76 @@
+{
+  // Real-world example: a FastAPI backend that serves its own built React
+  // bundle, so one process per preview covers the whole app.
+  //
+  // Copy to the repository root as preview.config.json.
+  "name": "accessmachine",
+
+  "pools": [
+    {
+      "id": "py",
+      "manifests": ["backend/requirements.txt"],
+      // ${MANIFEST} stays pointed at the worktree copy so any "-r" includes
+      // inside requirements.txt still resolve.
+      "install": [
+        "python -m venv \"${POOL}/venv\"",
+        "\"${POOL}/venv/${BIN}/python\" -m pip install --disable-pip-version-check -r \"${MANIFEST}\""
+      ]
+    },
+    {
+      "id": "node",
+      "manifests": ["frontend/package-lock.json", "frontend/package.json"],
+      // --legacy-peer-deps matches this project's Dockerfile.
+      "install": "npm ci --legacy-peer-deps --prefer-offline --no-audit --no-fund",
+      "link": { "frontend/node_modules": "${POOL}/node_modules" }
+    }
+  ],
+
+  "build": [
+    {
+      "name": "building frontend",
+      "run": "npm run build",
+      "cwd": "frontend",
+      "when": ["frontend"],
+      "output": "frontend/build"
+    }
+  ],
+
+  // Auto-reload: a tiny watcher is injected into the built index.html, and a
+  // revision marker is rewritten on every sync. Any open tab — however it was
+  // opened — reloads itself once the preview has been rebuilt and restarted.
+  // Remove this block to turn it off.
+  "reload": {
+    "injectInto": ["frontend/build/index.html"],
+    "intervalSeconds": 3
+  },
+
+  "services": [
+    {
+      "id": "app",
+      "label": "Backend",
+      "run": "\"${POOL:py}/venv/${BIN}/python\" -m uvicorn backend.main:app --host 127.0.0.1 --port ${PORT}",
+      "env": { "PYTHONPATH": "${WORKTREE}/backend" },
+      "health": { "path": "/api/health" },
+      "open": true
+    }
+  ],
+
+  "envFiles": [
+    {
+      "path": "backend/.env",
+      "copyFrom": ["backend/.env", ".env"],
+      // The preview's own origin must be trusted or the CSRF/origin guard and
+      // CORS will reject authenticated requests on this port.
+      "appendToCsv": {
+        "FRONTEND_URLS": ["http://localhost:${PORT:app}", "http://127.0.0.1:${PORT:app}"]
+      }
+      // To give each preview its own databases instead of sharing your dev
+      // data, add for example:
+      // "set": {
+      //   "APP_DB_NAME": "preview_${SLOT}_app",
+      //   "USERS_DB_NAME": "preview_${SLOT}_users",
+      //   "QUEUE_WORKER_GROUP": "preview-${SLOT}"
+      // }
+    }
+  ]
+}
