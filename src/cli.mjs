@@ -325,7 +325,9 @@ function processStartEpoch(pid) {
       const res = spawnSync(
         'powershell',
         ['-NoProfile', '-Command',
-          `[int64]((Get-Process -Id ${pid}).StartTime - (Get-Date '1970-01-01')).TotalSeconds`],
+          // Parenthesise so the cast applies to TotalSeconds (a double), not
+          // to the TimeSpan; UTC so timezone offsets cannot skew the compare.
+          `[int64](((Get-Process -Id ${pid}).StartTime.ToUniversalTime() - [datetime]'1970-01-01T00:00:00Z').TotalSeconds)`],
         { encoding: 'utf8', windowsHide: true },
       );
       const v = Number.parseInt((res.stdout || '').trim(), 10);
@@ -1044,7 +1046,20 @@ export async function stopServices(slot, { quiet = false } = {}) {
   while (Date.now() < graceful && !(await settled())) await sleep(200);
 
   if (!(await settled())) {
-    for (const [, proc] of procs) if (proc?.pid && pidAlive(proc.pid)) signalTree(proc.pid, 'SIGKILL');
+    if (IS_WIN) {
+      // taskkill /T can miss grandchildren spawned through a hidden-console
+      // shell (observed on the GitHub Windows runners: the cmd wrapper dies,
+      // the node child survives). Killing whoever LISTENS on the port we
+      // allocated is precise — we allocated the port and started the
+      // listener, so its owner is our service tree by construction.
+      for (const port of ports) {
+        spawnSync('powershell', ['-NoProfile', '-Command',
+          `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }`,
+        ], { stdio: 'ignore', windowsHide: true });
+      }
+    } else {
+      for (const [, proc] of procs) if (proc?.pid && pidAlive(proc.pid)) signalTree(proc.pid, 'SIGKILL');
+    }
     const forced = Date.now() + 5_000;
     while (Date.now() < forced && !(await settled())) await sleep(200);
     if (!(await settled())) {
@@ -1235,7 +1250,7 @@ export async function cmdAdd(branch, settings, state) {
     try {
       git(['worktree', 'remove', '--force', worktree]);
     } catch {
-      fs.rmSync(worktree, { recursive: true, force: true });
+      removeDirWithRetry(worktree);
       try { git(['worktree', 'prune']); } catch { /* best effort */ }
     }
     delete state.slots[branch];
@@ -1266,7 +1281,7 @@ export async function cmdRemove(branch, state) {
   try {
     git(['worktree', 'remove', '--force', worktree]);
   } catch {
-    fs.rmSync(worktree, { recursive: true, force: true });
+    removeDirWithRetry(worktree);
     try { git(['worktree', 'prune']); } catch { /* best effort */ }
   }
   fs.rmSync(logFile, { force: true });

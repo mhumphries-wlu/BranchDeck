@@ -12,6 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import httpClient from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -58,29 +59,30 @@ const git = (args, cwd) => sh('git', args, cwd);
 const deck = (args, cwd, opts) => sh(process.execPath, [CLI, ...args], cwd, opts);
 
 /**
- * GET with a couple of retries.
+ * GET with a few retries, over a FRESH socket every time (agent: false).
  *
- * Node's fetch pools keep-alive sockets per origin. A preview that restarts
- * between two requests leaves this process holding a socket to the old,
- * now-dead server, and reusing it fails at the transport layer — an artifact
- * of the long-lived test client, not of the server under test. Browsers retry
- * such idempotent requests transparently; so do we.
+ * fetch() pools keep-alive sockets per origin, and a preview that restarts
+ * between two requests leaves the pool holding a socket to the old, now-dead
+ * server. How undici recovers from that differs across Node versions —
+ * Node 18's bundled undici fails these requests outright — so the test
+ * client sidesteps pooling entirely rather than depending on any
+ * particular recovery behaviour.
  */
-async function get(url, attempts = 3) {
-  let lastErr;
-  for (let i = 0; i < attempts; i += 1) {
-    try {
-      const res = await fetch(url, {
-        signal: AbortSignal.timeout(5000),
-        headers: { connection: 'close' },
+function get(url, attempts = 5) {
+  return new Promise((resolve, reject) => {
+    const attempt = (n, lastErr) => {
+      if (n <= 0) return reject(lastErr || new Error('no attempts'));
+      const req = httpClient.get(url, { agent: false }, (res) => {
+        let body = '';
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+        res.on('error', (err) => setTimeout(() => attempt(n - 1, err), 400));
       });
-      return { status: res.status, body: await res.text() };
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 300));
-    }
-  }
-  throw lastErr;
+      req.setTimeout(5000, () => req.destroy(new Error('timeout')));
+      req.on('error', (err) => setTimeout(() => attempt(n - 1, err), 400));
+    };
+    attempt(attempts, null);
+  });
 }
 
 // --- fixture ----------------------------------------------------------------
@@ -431,8 +433,6 @@ async function main() {
   // via .git/info/exclude), in which case NO worktree can ever contain it and
   // the clone's copy has to govern. This previously failed every add outright.
   await testAsync('previews work when the config is untracked (never committed)', async () => {
-    const solo = path.join(ROOT, 'solo');
-    git(['clone', '-q', originDir, solo], ROOT);
     // Remove the committed config on the branch, exactly as an unaware repo looks…
     git(['checkout', '-q', 'master'], seed);
     fs.rmSync(path.join(seed, 'preview.config.json'));
@@ -442,6 +442,12 @@ async function main() {
     git(['checkout', '-qb', 'feat/noconfig', 'master'], seed);
     git(['commit', '-q', '--allow-empty', '-m', 'branch without a config'], seed);
     git(['push', '-q', 'origin', 'feat/noconfig'], seed);
+
+    // Clone AFTER the removal is pushed: the clone must never contain a
+    // tracked copy of the config. (It also sidesteps Git-for-Windows autocrlf
+    // marking a rewritten tracked file as modified purely over line endings.)
+    const solo = path.join(ROOT, 'solo');
+    git(['clone', '-q', originDir, solo], ROOT);
 
     // …while the developer keeps their copy only in the clone, untracked.
     // Write ONLY the config: touching tracked files would dirty the clone and
