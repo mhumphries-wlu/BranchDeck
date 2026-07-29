@@ -31,8 +31,8 @@ what changed, and the tab in front of you can refresh itself.
   folders that git manages for you, sharing your clone's history.
 - **Shared dependency installs.** The tenth preview costs megabytes, not
   another `node_modules`.
-- **One-command updates.** `branchdeck refresh` pulls the newest commits,
-  rebuilds only what changed, and restarts.
+- **Safe automatic updates.** `branchdeck watch` checks for new commits, then
+  rebuilds and restarts only the branches that actually moved.
 - **Auto-reload.** Open tabs refresh when their preview is rebuilt.
 - **A browser control pane**, if you'd rather click than type.
 - **No Docker, no cloud, no background service.** Ordinary processes on your
@@ -140,8 +140,26 @@ branchdeck add agent/search-fixes
 branchdeck open
 ```
 
-**Bring them up to date** — when your agent pushes something and you want to
-see it:
+**Keep them up to date** while your agent pushes:
+
+```bash
+branchdeck watch                             # every preview
+branchdeck watch claude/fix-login-4a2f9c     # one branch
+```
+
+`watch` fetches the remote commit id on an interval, but compares it with the
+commit already running **before** it considers process health or calls the
+restart path. No new commit means no rebuild and no restart. When a branch
+moves, BranchDeck updates that worktree, rebuilds only what changed, restarts
+on the same ports, and the open tab reloads after the app is ready.
+
+The default interval is 60 seconds. Override it for one run with
+`--interval <seconds>`, or set `watchIntervalSeconds` in the machine-local
+settings file. `Ctrl+C` stops watching but leaves the previews running. Watch
+holds BranchDeck's repository lock, so stop it before issuing another CLI
+command.
+
+For a manual update instead:
 
 ```bash
 branchdeck refresh                          # every preview
@@ -155,9 +173,8 @@ alone. If it *has* moved, the worktree is updated, only the build steps whose
 inputs changed re-run, and the servers restart on the same ports. Tabs you
 opened from branchdeck reload themselves once the app is back.
 
-Refreshing is deliberately something you ask for. branchdeck does not poll
-`origin` in the background, so it never restarts a server while you're in the
-middle of clicking through it — nothing moves until you say so.
+For schedulers and diagnostics, `branchdeck watch --once` performs one safe
+commit check and exits.
 
 ## The browser control pane
 
@@ -283,6 +300,7 @@ easier.
 | `branchdeck refresh` | Fetch every preview, rebuild what changed, restart |
 | `branchdeck refresh <branch>` | Same, for one branch |
 | `branchdeck refresh --port <n>` | Same, for whichever branch is on that port |
+| `branchdeck watch [<branch>] [--interval N]` | Auto-refresh only after new commits |
 | `branchdeck open [<branch>]` | Open browser tabs |
 | `branchdeck status [--offline]` | Ports, running services, commit, sharing |
 | `branchdeck stop [<branch>\|--all]` | Stop a preview's servers |
@@ -492,8 +510,8 @@ myrepo-previews/
   logs/<slot>.log              install and build output
   logs/<slot>.<service>.log    one console per server
   state.json                   previews, ports, the commit each one is on
-  settings.json                basePort, browser, autoReload,
-                               autoReloadTabs, env, uiPort
+  settings.json                basePort, browser, watchIntervalSeconds,
+                               autoReload, autoReloadTabs, env, uiPort
   .lock                        held while a command runs
 ```
 
