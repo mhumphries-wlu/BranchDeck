@@ -8,8 +8,8 @@
  *
  * Each branch gets a "slot": a git worktree pinned to origin/<branch>, links
  * into shared dependency pools, generated env files, and one port per
- * declared service. `branchdeck refresh` re-syncs, rebuilds what changed,
- * and restarts — on demand, never on a timer.
+ * declared service. `branchdeck watch` checks origin for new commits and only
+ * re-syncs, rebuilds, and restarts a slot after its remote branch moves.
  *
  * The design point that makes this practical rather than a disk-space
  * disaster: dependency pools are CONTENT-ADDRESSED. A pool entry is keyed by
@@ -440,6 +440,7 @@ export function releaseLock() {
 const DEFAULT_SETTINGS = {
   basePort: 8101,
   browser: null, // "chrome" | "msedge" | "firefox" | null = OS default
+  watchIntervalSeconds: 60,
   // Re-navigate preview tabs the control pane opened once their services have
   // restarted. Off by default: reloading a tab someone is typing into loses
   // their work, so this is the user's call, not ours.
@@ -1152,9 +1153,9 @@ function slotContext(slot, worktree, pools = {}) {
   };
 }
 
-export async function syncSlot(slot, settings, { force = false } = {}) {
+export async function syncSlot(slot, settings, { force = false, remoteSha = null } = {}) {
   const { worktree, log: logFile } = slotPaths(slot);
-  const newSha = fetchBranch(slot.branch);
+  const newSha = remoteSha || fetchBranch(slot.branch);
   const running = Object.values(slot.procs || {}).some((p) => p && isOurProcess(p));
   if (newSha === slot.syncedSha && !force && running) return { changed: false };
 
@@ -1355,6 +1356,52 @@ async function cmdRefresh(arg, settings, state, { force = false, rest = [] } = {
     }
     saveState(state);
   }
+}
+
+/**
+ * Check origin and update only branches whose commit changed.
+ *
+ * This comparison happens before syncSlot examines process health. That is a
+ * deliberate safety boundary: a stale or unverifiable pid must never turn a
+ * harmless poll into an unsolicited restart when the branch has not moved.
+ */
+async function watchOnce(branches, settings, state) {
+  let updated = 0;
+  for (const branch of branches) {
+    const slot = state.slots[branch];
+    try {
+      const remoteSha = fetchBranch(branch);
+      if (remoteSha === slot.syncedSha) continue;
+      const { healthy } = await syncSlot(slot, settings, { remoteSha });
+      updated += 1;
+      log(`${new Date().toLocaleTimeString()} — ${branch} updated${healthy === false ? ' (UNHEALTHY)' : ''}`);
+      saveState(state);
+    } catch (err) {
+      log(`${branch}: automatic refresh failed — ${err.message}`);
+    }
+  }
+  return updated;
+}
+
+async function cmdWatch(arg, argv, settings, state) {
+  const target = arg && !arg.startsWith('--') ? arg : '--all';
+  const branches = resolveTargets(state, target);
+  const intervalArg = argv.indexOf('--interval');
+  const requested = intervalArg >= 0 ? Number(argv[intervalArg + 1]) : settings.watchIntervalSeconds;
+  const intervalSeconds = Math.max(1, Number(requested) || 60);
+  const once = argv.includes('--once');
+
+  if (!once) {
+    log(`watching ${branches.length} branch(es) every ${intervalSeconds}s; only new commits trigger a restart. Ctrl+C to stop.`);
+  }
+  do {
+    const updated = await watchOnce(branches, settings, state);
+    if (once) {
+      log(updated ? `updated ${updated} preview(s).` : 'no new commits; previews left running unchanged.');
+      return;
+    }
+    await sleep(intervalSeconds * 1000);
+  } while (true);
 }
 
 async function cmdStop(arg, state) {
@@ -1601,6 +1648,8 @@ Usage: branchdeck <command>          (run from inside your repository)
   add <branch>           Create a preview for a remote branch and start it
   refresh [<target>]     Fetch, rebuild what changed, restart. Target is a
                          branch name, --port <n>, or nothing for all previews
+  watch [<branch>]       Check origin periodically; restart only when that
+                         branch receives a new commit
   open [<branch>]        Open browser tab(s)
   status [--offline]     Table of previews: ports, running, sync state, pools
   stop [<branch>|--all]  Stop a preview's services
@@ -1618,7 +1667,7 @@ the repository itself. Config: preview.config.json (committed).
 Docs: https://github.com/mhumphries-wlu/BranchDeck`;
 
 const COMMANDS = new Set([
-  'init', 'ui', 'add', 'remove', 'rm', 'refresh', 'sync', 'restart', 'stop',
+  'init', 'ui', 'add', 'remove', 'rm', 'refresh', 'sync', 'watch', 'restart', 'stop',
   'status', 'open', 'logs', 'consoles', 'gc',
 ]);
 
@@ -1673,6 +1722,7 @@ async function main() {
       // do not break.
       case 'refresh': case 'sync':
         await cmdRefresh(arg, settings, state, { rest: argv.slice(2) }); break;
+      case 'watch': await cmdWatch(arg, argv, settings, state); break;
       case 'restart':
         await cmdRefresh(arg, settings, state, { force: true, rest: argv.slice(2) }); break;
       case 'stop': await cmdStop(arg, state); break;

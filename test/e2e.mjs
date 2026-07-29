@@ -312,6 +312,16 @@ async function main() {
     assert.match(out, /already up to date and running/);
   });
 
+  test('watch leaves a running preview untouched when the commit has not changed', () => {
+    const stateFile = path.join(ROOT, 'work-previews', 'state.json');
+    const before = JSON.parse(fs.readFileSync(stateFile, 'utf8')).slots['feat/one'];
+    const out = deck(['watch', 'feat/one', '--once'], work);
+    const after = JSON.parse(fs.readFileSync(stateFile, 'utf8')).slots['feat/one'];
+    assert.match(out, /no new commits; previews left running unchanged/);
+    assert.deepEqual(after.procs, before.procs, 'a no-change poll must not restart services');
+    assert.deepEqual(after.buildShas, before.buildShas, 'a no-change poll must not rebuild');
+  });
+
   // `sync` was the original name; scripts and muscle memory still use it.
   test('sync is still accepted as an alias for refresh', () => {
     assert.match(deck(['sync', 'feat/one'], work), /already up to date and running/);
@@ -335,12 +345,13 @@ async function main() {
     assert.match(out, /\[feat\/two\]/, out);
   });
 
-  await testAsync('a new commit updates the served content', async () => {
+  await testAsync('watch applies a new commit and updates the served content', async () => {
     git(['checkout', '-q', 'feat/one'], seed);
     fs.writeFileSync(path.join(seed, 'src', 'marker.txt'), 'feat/one-v2\n');
     git(['commit', '-qam', 'v2'], seed);
     git(['push', '-q', 'origin', 'feat/one'], seed);
-    const out = deck(['refresh', 'feat/one'], work);
+    const out = deck(['watch', 'feat/one', '--once'], work);
+    assert.match(out, /updated 1 preview/);
     const res = await get(/ready -> (\S+)/.exec(out)[1]);
     assert.match(res.body, /^feat\/one-v2\|base$/);
   });
